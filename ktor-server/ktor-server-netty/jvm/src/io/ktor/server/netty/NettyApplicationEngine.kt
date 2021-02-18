@@ -84,25 +84,31 @@ public class NettyApplicationEngine(
     /**
      * [EventLoopGroupProxy] for accepting connections
      */
-    private val connectionEventGroup: EventLoopGroupProxy by lazy {
-        EventLoopGroupProxy.create(configuration.connectionGroupSize)
+    private val connectionEventGroup: EventLoopGroup by lazy {
+        customBootstrapConfig.group() ?: EventLoopGroupProxy.create(configuration.connectionGroupSize)
     }
 
     /**
      * [EventLoopGroupProxy] for processing incoming requests and doing engine's internal work
      */
-    private val workerEventGroup: EventLoopGroupProxy by lazy {
-        if (configuration.shareWorkGroup) {
+    private val workerEventGroup: EventLoopGroup by lazy {
+        val defaultGroup = if (configuration.shareWorkGroup) {
             EventLoopGroupProxy.create(configuration.workerGroupSize + configuration.callGroupSize)
         } else {
             EventLoopGroupProxy.create(configuration.workerGroupSize)
         }
+
+        customBootstrapConfig.childGroup() ?: defaultGroup
+    }
+
+    private val customBootstrapConfig: ServerBootstrapConfig by lazy {
+        ServerBootstrap().apply(configuration.configureBootstrap).config()
     }
 
     /**
      * [EventLoopGroupProxy] for processing [ApplicationCall] instances
      */
-    private val callEventGroup: EventLoopGroupProxy by lazy {
+    private val callEventGroup: EventLoopGroup by lazy {
         if (configuration.shareWorkGroup) {
             workerEventGroup
         } else {
@@ -122,34 +128,50 @@ public class NettyApplicationEngine(
 
     private var channels: List<Channel>? = null
     private val bootstraps: List<ServerBootstrap> by lazy {
-        environment.connectors.map { connector ->
-            ServerBootstrap().apply {
-                configuration.configureBootstrap(this)
+        environment.connectors.map(::createBootstrap)
+    }
 
-                if (config().group() == null && config().childGroup() == null) {
-                    group(connectionEventGroup, workerEventGroup)
-                }
+    private fun createBootstrap(connector: EngineConnectorConfig): ServerBootstrap {
+        return ServerBootstrap().apply {
+            copyCustomOptions()
 
-                channel(connectionEventGroup.channel.java)
-                childHandler(
-                    NettyChannelInitializer(
-                        pipeline, environment,
-                        callEventGroup,
-                        engineDispatcherWithShutdown,
-                        environment.parentCoroutineContext + dispatcherWithShutdown,
-                        connector,
-                        configuration.requestQueueLimit,
-                        configuration.runningLimit,
-                        configuration.responseWriteTimeoutSeconds,
-                        configuration.requestReadTimeoutSeconds,
-                        configuration.httpServerCodec
-                    )
+            group(connectionEventGroup, workerEventGroup)
+
+            if (customBootstrapConfig.channelFactory() != null) {
+                @Suppress("DEPRECATION")
+                channelFactory(customBootstrapConfig.channelFactory())
+            } else {
+                channel(getChannelClass().java)
+            }
+
+            childHandler(
+                NettyChannelInitializer(
+                    pipeline,
+                    environment,
+                    callEventGroup,
+                    engineDispatcherWithShutdown,
+                    environment.parentCoroutineContext + dispatcherWithShutdown,
+                    connector,
+                    configuration.requestQueueLimit,
+                    configuration.runningLimit,
+                    configuration.responseWriteTimeoutSeconds,
+                    configuration.requestReadTimeoutSeconds,
+                    configuration.httpServerCodec
                 )
-                if (configuration.tcpKeepAlive) {
-                    option(NioChannelOption.SO_KEEPALIVE, true)
-                }
+            )
+            if (configuration.tcpKeepAlive) {
+                option(NioChannelOption.SO_KEEPALIVE, true)
             }
         }
+    }
+
+    private fun ServerBootstrap.copyCustomOptions() {
+        if (customBootstrapConfig.handler() != null) handler(customBootstrapConfig.handler())
+        if (customBootstrapConfig.localAddress() != null) localAddress(customBootstrapConfig.localAddress())
+        config().options().putAll(customBootstrapConfig.options())
+        config().attrs().putAll(customBootstrapConfig.attrs())
+        config().childOptions().putAll(customBootstrapConfig.childOptions())
+        config().childAttrs().putAll(customBootstrapConfig.childAttrs())
     }
 
     init {
@@ -232,19 +254,12 @@ public class EventLoopGroupProxy(public val channel: KClass<out ServerSocketChan
                 }
             }
 
+            val channelClass = getChannelClass()
+
             return when {
-                KQueue.isAvailable() -> EventLoopGroupProxy(
-                    KQueueServerSocketChannel::class,
-                    KQueueEventLoopGroup(parallelism, factory)
-                )
-                Epoll.isAvailable() -> EventLoopGroupProxy(
-                    EpollServerSocketChannel::class,
-                    EpollEventLoopGroup(parallelism, factory)
-                )
-                else -> EventLoopGroupProxy(
-                    NioServerSocketChannel::class,
-                    NioEventLoopGroup(parallelism, factory)
-                )
+                KQueue.isAvailable() -> EventLoopGroupProxy(channelClass, KQueueEventLoopGroup(parallelism, factory))
+                Epoll.isAvailable() -> EventLoopGroupProxy(channelClass, EpollEventLoopGroup(parallelism, factory))
+                else -> EventLoopGroupProxy(channelClass, NioEventLoopGroup(parallelism, factory))
             }
         }
 
@@ -264,4 +279,10 @@ public class EventLoopGroupProxy(public val channel: KClass<out ServerSocketChan
             }
         }
     }
+}
+
+private fun getChannelClass(): KClass<out ServerSocketChannel> = when {
+    KQueue.isAvailable() -> KQueueServerSocketChannel::class
+    Epoll.isAvailable() -> EpollServerSocketChannel::class
+    else -> NioServerSocketChannel::class
 }

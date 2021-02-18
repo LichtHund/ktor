@@ -138,7 +138,7 @@ public class NettyApplicationEngine(
             group(connectionEventGroup, workerEventGroup)
 
             if (customBootstrapConfig.channelFactory() != null) {
-                @Suppress("DEPRECATION")
+                @Suppress("DEPRECATION") // There is no other way to set user defined channel factory
                 channelFactory(customBootstrapConfig.channelFactory())
             } else {
                 channel(getChannelClass().java)

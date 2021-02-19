@@ -85,7 +85,7 @@ public class NettyApplicationEngine(
      * [EventLoopGroupProxy] for accepting connections
      */
     private val connectionEventGroup: EventLoopGroup by lazy {
-        customBootstrapConfig.group() ?: EventLoopGroupProxy.create(configuration.connectionGroupSize)
+        customBootstrap.config().group() ?: EventLoopGroupProxy.create(configuration.connectionGroupSize)
     }
 
     /**
@@ -98,11 +98,11 @@ public class NettyApplicationEngine(
             EventLoopGroupProxy.create(configuration.workerGroupSize)
         }
 
-        customBootstrapConfig.childGroup() ?: defaultGroup
+        customBootstrap.config().childGroup() ?: defaultGroup
     }
 
-    private val customBootstrapConfig: ServerBootstrapConfig by lazy {
-        ServerBootstrap().apply(configuration.configureBootstrap).config()
+    private val customBootstrap: ServerBootstrap by lazy {
+        ServerBootstrap().apply(configuration.configureBootstrap)
     }
 
     /**
@@ -132,15 +132,12 @@ public class NettyApplicationEngine(
     }
 
     private fun createBootstrap(connector: EngineConnectorConfig): ServerBootstrap {
-        return ServerBootstrap().apply {
-            copyCustomOptions()
+        return customBootstrap.clone().apply {
+            if (config().group() == null && config().childGroup() == null) {
+                group(connectionEventGroup, workerEventGroup)
+            }
 
-            group(connectionEventGroup, workerEventGroup)
-
-            if (customBootstrapConfig.channelFactory() != null) {
-                @Suppress("DEPRECATION") // There is no other way to set user defined channel factory
-                channelFactory(customBootstrapConfig.channelFactory())
-            } else {
+            if (config().channelFactory() == null) {
                 channel(getChannelClass().java)
             }
 
@@ -163,15 +160,6 @@ public class NettyApplicationEngine(
                 option(NioChannelOption.SO_KEEPALIVE, true)
             }
         }
-    }
-
-    private fun ServerBootstrap.copyCustomOptions() {
-        if (customBootstrapConfig.handler() != null) handler(customBootstrapConfig.handler())
-        if (customBootstrapConfig.localAddress() != null) localAddress(customBootstrapConfig.localAddress())
-        config().options().putAll(customBootstrapConfig.options())
-        config().attrs().putAll(customBootstrapConfig.attrs())
-        config().childOptions().putAll(customBootstrapConfig.childOptions())
-        config().childAttrs().putAll(customBootstrapConfig.childAttrs())
     }
 
     init {
